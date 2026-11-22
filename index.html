@@ -492,7 +492,7 @@ canvas#confetti{position:fixed;inset:0;z-index:90;pointer-events:none}
 const CONFIG = {
   brandName:  'Support Desk',        // <- name shown on top and in footer
   brandTag:   '',                    // <- optional small text under the name (empty = hidden)
-  appsScriptUrl: '',                 // <- paste your Google Apps Script "Web app" URL here (see SETUP-GUIDE.md)
+  appsScriptUrl: 'https://script.google.com/macros/s/AKfycbwFFnYsnH1g1xvuvlzRXRUmOQdMKZQE9SnX5nL5yDrX8Cz6ZEOfhxhWTNb_nGbRm3Ce/exec',                 // <- paste your Google Apps Script "Web app" URL here (see SETUP-GUIDE.md)
   ticket:   { maxFileMB: 100, maxFiles: 10 },
   feedback: { maxFileMB: 20,  maxFiles: 5  }
 };
@@ -576,7 +576,7 @@ function words(text, start = 0) {
 }
 const fmtSize = b => b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
 let toastT;
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 3600); }
+function toast(msg, ms = 3600) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), ms); }
 
 const ICON = {
   arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
@@ -1154,19 +1154,24 @@ async function uploadItem(it, ref, kind, n) {
   const blob = it.out, safe = (blob.name || it.name).replace(/[^\w.\-]+/g, '_').slice(-80);
   const fileName = `${n + 1}-${safe}`, mimeType = blob.type || 'application/octet-stream';
   const prog = v => { it.p.u = v; it.onprog && it.onprog(); };
+  let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const init = await api({ action: 'init', kind, ref, fileName, mimeType, size: blob.size, origin: location.origin });
-      try { const j = await putFile(init.uploadUrl, blob, prog); if (j.id) { prog(1); return { id: j.id, name: fileName }; } } catch (e) { /* maybe only the browser response was blocked: verify below */ }
-      const lk = await api({ action: 'lookup', kind, ref, fileName });
-      if (lk.id && Number(lk.size) === blob.size) { prog(1); return { id: lk.id, name: fileName }; }
-      if (blob.size <= 20 * 1048576) {
+      let init = null;
+      try { init = await api({ action: 'init', kind, ref, fileName, mimeType, size: blob.size, origin: location.origin }); }
+      catch (e) { lastErr = e; console.warn('resumable upload not available:', e.message); }
+      if (init) {
+        try { const j = await putFile(init.uploadUrl, blob, prog); if (j.id) { prog(1); return { id: j.id, name: fileName }; } } catch (e) { lastErr = e; /* maybe only the browser response was blocked: verify below */ }
+        const lk = await api({ action: 'lookup', kind, ref, fileName });
+        if (lk.id && Number(lk.size) === blob.size) { prog(1); return { id: lk.id, name: fileName }; }
+      }
+      if (blob.size <= 20 * 1048576) {                                  // fallback: send through Apps Script
         const up = await api({ action: 'uploadSmall', kind, ref, fileName, mimeType, data: await toB64(blob) }, 180000);
         prog(1); return { id: up.id, name: fileName };
       }
-    } catch (e) { if (attempt) throw e; await wait(1200); }
+    } catch (e) { lastErr = e; await wait(1200); }
   }
-  throw new Error('Upload failed');
+  throw lastErr || new Error('Upload failed');
 }
 function payloadFor() { const out = {}; S.steps.forEach(st => { if (st.key && st.type !== 'upload') out[st.key] = ansText(st); }); return out; }
 
@@ -1186,7 +1191,7 @@ async function submit() {
     if (!CONFIG.appsScriptUrl) {                                         // PREVIEW MODE (no backend connected yet)
       for (const i of items) { await i.prepared; for (let k = 1; k <= 6; k++) { i.p.u = k / 6; setP(); await wait(180); } }
       await wait(700); setLoading(.97); await wait(500);
-      toast('Preview mode: add your Google Apps Script URL to receive real data.');
+      toast('PREVIEW MODE: this was NOT saved anywhere. Add your Apps Script URL in index.html.', 9000);
     } else {
       for (let n = 0; n < items.length; n++) { await items[n].prepared; uploaded.push(await uploadItem(items[n], ref, S.key, n)); }
       setLoading(.96);
@@ -1196,7 +1201,7 @@ async function submit() {
     S.sent = true; removeEventListener('beforeunload', onLeave);
     showDone(ref);
   } catch (e) {
-    console.error(e); removeEventListener('beforeunload', onLeave); showFail();
+    console.error(e); removeEventListener('beforeunload', onLeave); S.lastErr = String((e && e.message) || e); showFail();
   } finally { S.busy = false; flowEl.classList.remove('busy'); }
 }
 
@@ -1238,6 +1243,7 @@ function showFail() {
   const s = el('div', 'slide'); s.innerHTML = `<div class="slide-inner center">
     <h2 class="q">${words('Oops, that *did not* go through.')}</h2>
     <p class="sub rise" style="--d:500ms">Please check your internet connection and try again. Your answers are safe. Nothing was lost.</p>
+    <p class="hint" style="margin-top:-18px;margin-bottom:22px;display:block;max-width:60ch;word-break:break-word">${esc(S.lastErr || '')}</p>
     <div class="actions rise" style="--d:700ms;justify-content:center"><button class="btn" id="retry">Try again${ICON.arrow}</button></div></div>`;
   swapSlide(s); $('#retry').onclick = () => { S.busy = false; render(S.steps.length - 1, -1); };
 }
